@@ -2,14 +2,15 @@ import io
 import time
 import os
 import warnings
+import sys
+
 import requests
 import pyodbc
 import numpy as np
 import pandas as pd
-import sys
 
-from pandas import concat
 from geopy.distance import geodesic
+from datetime import timedelta
 
 pd.options.mode.chained_assignment = None
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -29,12 +30,13 @@ def clear_columns(df):
     return df
 
 
-def distance(row):
+def distance(data):
     res = np.nan
     try:
-        res = geodesic((row['latitude'], row['longitude']), (row['lat'], row['lon'])).kilometers
-    except Exception as e:
-        print('Distance error:', e)
+        res = geodesic((data['latitude'], data['longitude']), (data['lat'], data['lon'])).kilometers
+        res = round(res, 2)
+    except Exception as ex:
+        print('Distance error:', ex)
     return res
 
 
@@ -47,53 +49,63 @@ def check_file(filename):
 
 def get_station_info(st_name, date):
     st_year = date[:4]
-    file_name = f'./station_data/{st_year}_{st_name}.csv'
-    csv_url = f'https://www.ncei.noaa.gov/data/global-hourly/access/{st_year}/{st_name}.csv'
-
+    st_columns = [
+        'STATION', 'DATE', 'SOURCE', 'REPORT_TYPE', 'CALL_SIGN', 'QUALITY_CONTROL',
+        'CIG', 'DEW', 'SLP', 'TMP', 'VIS', 'WND'
+    ]
+    file_url = f'https://www.ncei.noaa.gov/data/global-hourly/access/{st_year}/{st_name}.csv'
     url = f'https://www.ncei.noaa.gov/access/services/data/v1?dataset=global-hourly&stations={st_name}'\
           f'&dataTypes=WND,CIG,VIS,TMP,DEW,SLP'\
-          f'&startDate={st_year}-01-01&endDate={st_year}-12-31&includeAttributes=true&format=csv'
+          f'&startDate={date}&endDate={date}&includeAttributes=true&format=csv'
 
-    if check_file(file_name):
-        df = pd.read_csv(file_name)
+    code = 0
+    rnd = 0
+    response = None
+    df = pd.DataFrame()
+    while code != 200 or rnd == 3:
+        rnd += 1
+        response = requests.get(url)
+        code = response.status_code
+        print('API load status:', code)
+        time.sleep(1)
+
+    if rnd == 3:
+        try:
+            df = pd.read_csv(file_url)
+            df = df[st_columns]
+        except Exception as ex:
+            print(ex)
     else:
-        code = 0
-        while code != 200:
-            response = requests.get(url)
-            code = response.status_code
-            print('API load status:', code)
-            time.sleep(2)
         response_text = response.content.decode()
         df = pd.read_csv(io.StringIO(response_text))
-        df.drop(columns=['source'], inplace=True)
-        if not df.empty:
-            df.to_csv(file_name)
+        df.drop(columns=['SOURCE'], inplace=True)
 
     return df
 
 
-def make_final(row):
-    tmp = pd.DataFrame(data=[list(row.values)], columns=row.index)
+def make_final(data):
+    need_st = pd.DataFrame()
+    tmp = pd.DataFrame(data=[list(data.values)], columns=data.index)
     tmp = tmp.merge(df_st_tmp, how='cross')
 
     tmp['st_distance'] = tmp.apply(distance, axis=1)
 
-    df_sorted = tmp.groupby('airport_id').apply(lambda x: x.sort_values('distance')).reset_index(drop=True)
+    df_sorted = tmp.groupby('airport_id').apply(lambda x: x.sort_values('st_distance')).reset_index(drop=True)
     df_sorted['row_number'] = df_sorted.groupby('airport_id').cumcount() + 1
     df_air_st_info = df_sorted.query('row_number <= 3')
     try:
         df_air_st_info.loc[:, 'time_round'] = pd.to_datetime(df_air_st_info.copy()['time'], format='%H:%M')
         df_air_st_info['time_round'] = df_air_st_info['time_round'].dt.round('H').dt.strftime('%H:%M')
-    except Exception as e:
-        print('Error convert "time" in "df_air_st_info": ', e)
+    except Exception as ex:
+        print('Error convert "time" in "df_air_st_info": ', ex)
 
     for i in range(3):
         st_code = df_air_st_info.iloc[i]['st_code']
         date = df_air_st_info.iloc[i]['incident_date'].strftime('%Y-%m-%d')
         try:
             need_st = get_station_info(st_code, date)
-        except Exception as e:
-            print('Error, no station found: ', e)
+        except Exception as ex:
+            print('Error, no station found: ', ex)
             print('st_code:', st_code, 'date:', date)
         if not need_st.empty:
             print(f'Station found, st_code: {st_code}, date: {date}')
@@ -108,8 +120,8 @@ def make_final(row):
         need_st['time_round'] = need_st['date'].dt.round('H').dt.strftime('%H:%M')
         need_st['date'] = need_st['date'].dt.date
         need_st['date'] = pd.to_datetime(need_st['date'])
-    except Exception as e:
-        print('Error convert "time" in "need_st": ', e)
+    except Exception as ex:
+        print('Error convert "time" in "need_st": ', ex)
 
     left_cols = ['incident_date', 'time_round']
     right_cols = ['date', 'time_round']
@@ -143,8 +155,10 @@ df_inc = df_inc.query(
 )
 
 # загрузим все станции с координатами
+st_url = 'https://www.ncei.noaa.gov/pub/data/noaa/isd-history.csv'
+
 df_st = pd.read_csv(
-    'isd-history.csv',
+    st_url,
     delimiter=',',
     parse_dates=['BEGIN', 'END'],
     dtype={'USAF': str, 'WBAN': str}
@@ -166,21 +180,23 @@ df_st_tmp = df_st[['st_code', 'end', 'lat', 'lon']].copy()
 
 
 final_df = pd.DataFrame()
-last_index = 0
+total_rows = df_inc_tmp.shape[0]
+row_num = 0
 errors = 0
+total_time = 0
+start_time = time.time()
 
 for index, row in df_inc_tmp.iterrows():
-    if index < 0:
-        continue
-    else:
-        last_index = index
-        print(f'Row num: {last_index}, errors: {errors}')
-        try:
-            final_df = concat([final_df, make_final(row)])
-        except Exception as e:
-            errors += 1
-            print(f'Error load line {last_index}: ', e)
-        if index % 50 == 0:
-            final_df.to_csv(f'file_{START_DATE}_{END_DATE}_{index}.csv', index=False)
+    row_num += 1
+    try:
+        final_df = pd.concat([final_df, make_final(row)])
+    except Exception as e:
+        errors += 1
+        print(f'Error load row {row_num}: ', e)
 
-final_df.to_csv(f'file_{START_DATE}_{END_DATE}_full.csv', index=False)
+    total_time = time.time() - start_time
+    avg_time = round((total_time / row_num) * total_rows - total_time)
+    print(f'Row: {row_num}/{total_rows}, errors: {errors} | wait time: {timedelta(seconds=avg_time)}')
+
+
+final_df.to_csv(f'data_{START_DATE}_{END_DATE}.csv', index=False)
