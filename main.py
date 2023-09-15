@@ -124,6 +124,9 @@ def make_final(data):
     except Exception as ex:
         print('Error convert "time" in "need_st": ', ex)
 
+    if df_air_st_info.iloc[0]['airport_id'] == 'ZZZZ':
+        df_air_st_info['time_round'] = '24:00'
+
     left_cols = ['incident_date', 'time_round']
     right_cols = ['date', 'time_round']
     fin_df = pd.merge(df_air_st_info.head(1), need_st,
