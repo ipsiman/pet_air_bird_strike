@@ -153,7 +153,7 @@ else:
 # загружаем полную базу инцидентов из файла
 conn = pyodbc.connect(
     r'Driver={Microsoft Access Driver (*.mdb, *.accdb)};'
-    r'DBQ=D:\Develop\DE_Bird_Strike\Public.accdb;')
+    r'DBQ=./Public.accdb;')
 
 sql = (f"""
     SELECT *
