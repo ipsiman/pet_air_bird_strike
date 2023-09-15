@@ -33,11 +33,12 @@ def fix_columns(df):
 
 def distance(data):
     res = np.nan
-    try:
-        res = geodesic((data['latitude'], data['longitude']), (data['lat'], data['lon'])).kilometers
-        res = round(res, 2)
-    except Exception as ex:
-        print('Distance error:', ex)
+    if not (np.isnan(data['latitude']) or np.isnan(data['latitude'])):
+        try:
+            res = geodesic((data['latitude'], data['longitude']), (data['lat'], data['lon'])).kilometers
+            res = round(res, 2)
+        except Exception as ex:
+            print('Distance error:', ex)
     return res
 
 
