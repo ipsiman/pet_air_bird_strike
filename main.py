@@ -3,6 +3,7 @@ import time
 import os
 import warnings
 import sys
+import zipfile
 
 import requests
 import pyodbc
@@ -24,7 +25,7 @@ START_MONTH = START_DATE[5:7]
 END_MONTH = END_DATE[5:7]
 
 
-def clear_columns(df):
+def fix_columns(df):
     for col in df.columns:
         df.rename(columns={col: col.lower().strip()}, inplace=True)
     return df
@@ -49,14 +50,13 @@ def check_file(filename):
 
 def get_station_info(st_name, date):
     st_year = date[:4]
-    st_columns = [
-        'STATION', 'DATE', 'SOURCE', 'REPORT_TYPE', 'CALL_SIGN', 'QUALITY_CONTROL',
-        'CIG', 'DEW', 'SLP', 'TMP', 'VIS', 'WND'
-    ]
+    st_columns = ['STATION', 'DATE', 'SOURCE', 'REPORT_TYPE', 'CALL_SIGN',
+                  'QUALITY_CONTROL', 'CIG', 'DEW', 'SLP', 'TMP', 'VIS', 'WND']
+
     file_url = f'https://www.ncei.noaa.gov/data/global-hourly/access/{st_year}/{st_name}.csv'
-    url = f'https://www.ncei.noaa.gov/access/services/data/v1?dataset=global-hourly&stations={st_name}'\
-          f'&dataTypes=WND,CIG,VIS,TMP,DEW,SLP'\
-          f'&startDate={date}&endDate={date}&includeAttributes=true&format=csv'
+    url = (f'https://www.ncei.noaa.gov/access/services/data/v1?dataset=global-hourly&stations={st_name}'
+           f'&dataTypes=WND,CIG,VIS,TMP,DEW,SLP'
+           f'&startDate={date}&endDate={date}&includeAttributes=true&format=csv')
 
     code = 0
     rnd = 0
@@ -114,7 +114,7 @@ def make_final(data):
             print('Error, no station found:', st_code, 'date:', date)
             print('find next station')
 
-    need_st = clear_columns(need_st)
+    need_st = fix_columns(need_st)
     try:
         need_st['date'] = pd.to_datetime(need_st['date'])
         need_st['time_round'] = need_st['date'].dt.round('H').dt.strftime('%H:%M')
@@ -125,7 +125,8 @@ def make_final(data):
 
     left_cols = ['incident_date', 'time_round']
     right_cols = ['date', 'time_round']
-    fin_df = pd.merge(df_air_st_info.head(1), need_st, left_on=left_cols, right_on=right_cols, how='left')
+    fin_df = pd.merge(df_air_st_info.head(1), need_st,
+                      left_on=left_cols, right_on=right_cols, how='left')
 
     drop_col = ['airport_id', 'incident_date', 'time', 'latitude', 'longitude',
                 'end', 'lat', 'lon', 'row_number', 'time_round', 'station', 'date']
@@ -136,11 +137,19 @@ def make_final(data):
     return result
 
 
+# проверяем наличие архива с БД и извлекаем файл БД
+file_bd = 'NWSD.zip'
+if os.path.exists(file_bd):
+    with zipfile.ZipFile(file_bd, 'r') as zfile:
+        zfile.extract('Public.accdb')
+    os.remove(file_bd)
+else:
+    print(f'Файл {file_bd} не найден')
+
 # загружаем полную базу инцидентов из файла
 conn = pyodbc.connect(
     r'Driver={Microsoft Access Driver (*.mdb, *.accdb)};'
-    r'DBQ=D:\Develop\DE_Bird_Strike\Public.accdb;'
-)
+    r'DBQ=D:\Develop\DE_Bird_Strike\Public.accdb;')
 
 sql = (f"""
     SELECT *
@@ -166,18 +175,17 @@ df_st = pd.read_csv(
 df_st.query(f'LAT > 0 and END >= "{END_DATE}"', inplace=True)
 
 # приведем названия колонок во всех DF к нормальному виду
-df_inc = clear_columns(df_inc)
-df_st = clear_columns(df_st)
+df_inc = fix_columns(df_inc)
+df_st = fix_columns(df_st)
 
 # получим код станции
-df_st['wban'] = df_st['wban'].astype('str')
-df_st['usaf'] = df_st['usaf'].astype('str')
 df_st['st_code'] = df_st['usaf'] + df_st['wban']
 
-df_inc_tmp = df_inc[['index_nr', 'airport_id', 'incident_date', 'time', 'latitude', 'longitude']].copy()
+need_col = ['index_nr', 'airport_id', 'incident_date',
+            'time', 'latitude', 'longitude']
+df_inc_tmp = df_inc[need_col].copy()
 df_inc_tmp['airport_id'] = df_inc_tmp['airport_id'].astype('category')
 df_st_tmp = df_st[['st_code', 'end', 'lat', 'lon']].copy()
-
 
 final_df = pd.DataFrame()
 total_rows = df_inc_tmp.shape[0]
@@ -196,7 +204,7 @@ for index, row in df_inc_tmp.iterrows():
 
     total_time = time.time() - start_time
     avg_time = round((total_time / row_num) * total_rows - total_time)
-    print(f'Row: {row_num}/{total_rows}, errors: {errors} | wait time: {timedelta(seconds=avg_time)}')
-
+    print(f'Row: {row_num}/{total_rows}, '
+          f'errors: {errors} | wait time: {timedelta(seconds=avg_time)}')
 
 final_df.to_csv(f'data_{START_DATE}_{END_DATE}.csv', index=False)
